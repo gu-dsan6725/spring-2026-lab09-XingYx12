@@ -21,6 +21,11 @@ from strands import Agent
 from strands.telemetry import StrandsTelemetry
 from strands.tools.decorator import tool
 
+from strands.tools.mcp import MCPClient
+from mcp.client.streamable_http import streamablehttp_client
+from strands.models import AnthropicModel
+from strands import Agent
+
 
 # Configure logging
 logging.basicConfig(
@@ -96,7 +101,7 @@ def _setup_observability() -> TracerProvider:
             parent=braintrust_project
         )
     )
-
+    
     # Set tracer provider as global
     from opentelemetry import trace
     trace.set_tracer_provider(tracer_provider)
@@ -104,8 +109,10 @@ def _setup_observability() -> TracerProvider:
     logger.info(f"Braintrust observability configured for project: {braintrust_project}")
     return tracer_provider
 
+def create_streamable_http_transport():
+    return streamablehttp_client("https://mcp.context7.com/mcp")
 
-def _create_agent() -> Agent:
+def _create_agent(mcp_tools: list) -> Agent:
     """
     Create and configure the Strands agent.
 
@@ -116,16 +123,16 @@ def _create_agent() -> Agent:
 
     # Set up observability
     tracer_provider = _setup_observability()
-    telemetry = StrandsTelemetry(tracer_provider=tracer_provider)
+    
 
     # Get API key and set it in environment for LiteLLM
     anthropic_api_key = _get_env_var("ANTHROPIC_API_KEY")
     os.environ["ANTHROPIC_API_KEY"] = anthropic_api_key
 
     # Configure the agent with system prompt
-    system_prompt = """You are a helpful AI assistant with access to DuckDuckGo web search.
+    system_prompt = """You are a helpful AI assistant with access to DuckDuckGo web search and Context7 Documentation Search.
 
-Use the DuckDuckGo search tool to find current information, news, and answers to questions.
+Use the DuckDuckGo and Context7 search tool to find current information, news, and answers to questions.
 Provide clear, accurate, and helpful responses based on the search results.
 Always cite your sources when using search results."""
 
@@ -143,7 +150,7 @@ Always cite your sources when using search results."""
     agent = Agent(
         system_prompt=system_prompt,
         model=model,
-        tools=[duckduckgo_search]
+        tools=[duckduckgo_search] + mcp_tools
     )
 
     logger.info("Agent created successfully with Braintrust observability")
@@ -177,8 +184,8 @@ def main() -> None:
     logger.info("Starting Simple Agent with Observability")
 
     # Create agent
-    agent = _create_agent()
-
+    #agent = _create_agent()
+    mcp_client = MCPClient(create_streamable_http_transport)
     # Example queries to test different tools
     test_queries = [
         "What is the latest news about AI?",
@@ -193,32 +200,39 @@ def main() -> None:
     # Run interactive loop
     print("Ask me anything! I can search the web with DuckDuckGo.")
     print("Type 'quit' to exit.\n")
+    with mcp_client: 
+        logger.info("Loading tools from Context7...")
 
-    while True:
-        try:
-            user_input = input("You: ").strip()
+        mcp_tools = mcp_client.list_tools_sync()
+        agent = _create_agent(mcp_tools) 
 
-            if user_input.lower() in ["quit", "exit", "q"]:
-                print("\nGoodbye!")
+        print("\n" + "="*80)
+    
+        while True:
+            try:
+                user_input = input("You: ").strip()
+
+                if user_input.lower() in ["quit", "exit", "q"]:
+                    print("\nGoodbye!")
+                    break
+
+                if not user_input:
+                    continue
+
+                # Run agent
+                response = asyncio.run(_run_agent_async(agent, user_input))
+
+                print(f"\nAgent: {response}\n")
+
+            except EOFError:
+                print("\n\nGoodbye!")
                 break
-
-            if not user_input:
-                continue
-
-            # Run agent
-            response = asyncio.run(_run_agent_async(agent, user_input))
-
-            print(f"\nAgent: {response}\n")
-
-        except EOFError:
-            print("\n\nGoodbye!")
-            break
-        except KeyboardInterrupt:
-            print("\n\nGoodbye!")
-            break
-        except Exception as e:
-            logger.error(f"Error running agent: {e}")
-            print(f"\nError: {e}\n")
+            except KeyboardInterrupt:
+                print("\n\nGoodbye!")
+                break
+            except Exception as e:
+                logger.error(f"Error running agent: {e}") 
+                print(f"\nError: {e}\n")
 
 
 if __name__ == "__main__":
